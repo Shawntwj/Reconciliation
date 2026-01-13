@@ -27,17 +27,12 @@ def run_reconciliation(is_test_mode=False):
         df = pd.read_sql("SELECT * FROM stg.reconciliation_report;", engine)
 
         # 2. Map SQL columns to your AlertManager expectations
-        # record_ref -> contract_id
-        # bank_value -> trade_total
-        # exchange_value -> invoice_total
-        # value_diff -> amount_diff
-        # recon_status -> status
         df_mapped = df.rename(columns={
-            'record_ref': 'contract_id',
-            'bank_value': 'trade_total',
-            'exchange_value': 'invoice_total',
+            'bank_refs': 'product', 
+            'bank_value': 'trade_total', 
+            'exchange_value': 'invoice_total', 
             'value_diff': 'amount_diff',
-            'recon_status': 'status'
+            'recon_status': 'status'  
         })
 
         # 3. Calculate Summary Stats for Monika

@@ -13,16 +13,20 @@ def sample_critical_df():
     """Mock data representing critical breaks"""
     return pd.DataFrame([
         {
-            'contract_id': 'T001',
+            'product': 'T001',
             'counterparty': 'BP',
             'status': 'MISSING IN BANK',
-            'amount_diff': 500.00
+            'amount_diff': 500.00,
+            'trade_total': 1500.00,
+            'invoice_total': None
         },
         {
-            'contract_id': 'T002',
+            'product': 'T002',
             'counterparty': 'SHELL',
             'status': 'DISCREPANCY',
-            'amount_diff': 150.00
+            'amount_diff': 150.00,
+            'trade_total': 2000.00,
+            'invoice_total': 1850.00
         }
     ])
 
@@ -74,7 +78,7 @@ class TestEmailSender:
         """Mock SMTP to verify the email sending sequence"""
         mock_server = MagicMock()
         mock_smtp.return_value.__enter__.return_value = mock_server
-        
+
         env_vars = {
             "EMAIL_ENABLED": "true",
             "SMTP_HOST": "smtp.gmail.com",
@@ -84,15 +88,80 @@ class TestEmailSender:
             "EMAIL_FROM": "test@user.com",
             "EMAIL_TO": "boss@user.com"
         }
-        
+
         with patch.dict(os.environ, env_vars):
             sender = EmailAlertSender()
-            df = pd.DataFrame([{'contract_id': 'T1', 'amount_diff': 100, 'status': 'ERR', 'counterparty': 'X'}])
-            
-            result = sender.send_alerts(df, {'total_discrepancy_amount': 100})
-            
+            df = pd.DataFrame([{
+                'product': 'T1',
+                'amount_diff': 100,
+                'status': 'ERR',
+                'counterparty': 'X',
+                'trade_total': 500.00,
+                'invoice_total': 400.00
+            }])
+
+            result = sender.send_alerts(df, {
+                'total_discrepancy_amount': 100,
+                'total_contracts': 1,
+                'critical_alerts': 1
+            })
+
             assert result is True
             # Verify SMTP methods were called
             mock_server.starttls.assert_called_once()
             mock_server.login.assert_called_with("test@user.com", "password123")
             mock_server.send_message.assert_called_once()
+
+    def test_email_subject_format(self):
+        """Verify subject line is clean and informative"""
+        with patch.dict(os.environ, {"EMAIL_ENABLED": "false"}):
+            sender = EmailAlertSender()
+            subject = sender._create_subject(3, {'total_discrepancy_amount': 1500.50})
+            assert "Reconciliation Alert" in subject
+            assert "3 issues" in subject
+            assert "$1,500.50" in subject
+
+    def test_html_body_contains_key_elements(self):
+        """Verify HTML template has required sections"""
+        with patch.dict(os.environ, {"EMAIL_ENABLED": "false"}):
+            sender = EmailAlertSender()
+            df = pd.DataFrame([{
+                'product': 'T1',
+                'counterparty': 'Shell',
+                'amount_diff': 100,
+                'trade_total': 500,
+                'invoice_total': 400
+            }])
+            summary = {'total_contracts': 1, 'critical_alerts': 1, 'total_discrepancy_amount': 100}
+
+            html = sender._create_html_body(df, summary)
+
+            # Check for key sections
+            assert "Reconciliation Alert" in html
+            assert "Details" in html
+            assert "Shell" in html
+            assert "$100.00" in html
+            assert "Automated Reconciliation Pipeline" in html
+            # Verify table structure exists
+            assert "<table" in html
+            assert "Total Contracts" in html
+
+    def test_text_body_format(self):
+        """Verify plain text fallback is readable"""
+        with patch.dict(os.environ, {"EMAIL_ENABLED": "false"}):
+            sender = EmailAlertSender()
+            df = pd.DataFrame([{
+                'product': 'T1',
+                'counterparty': 'BP',
+                'amount_diff': 250,
+                'trade_total': 1000,
+                'invoice_total': 750
+            }])
+            summary = {'total_contracts': 1, 'critical_alerts': 1, 'total_discrepancy_amount': 250}
+
+            text = sender._create_text_body(df, summary)
+
+            assert "RECONCILIATION ALERT" in text
+            assert "BP" in text
+            assert "$250.00" in text
+            assert "Automated Reconciliation Pipeline" in text

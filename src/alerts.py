@@ -30,7 +30,7 @@ class AlertManager:
         logger.warning("=" * 80)
 
         for _, row in alerts_df.iterrows():
-            logger.warning(f"Contract: {row['contract_id']} | Counterparty: {row['counterparty']}")
+            logger.warning(f"Contract: {row['product']} | Counterparty: {row['counterparty']}")
             logger.warning(f"Status:   {row['status']}")
             logger.warning(f"Diff:     ${row['amount_diff']:,.2f}")
             self._add_business_context(row)
