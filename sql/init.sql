@@ -3,7 +3,7 @@
 CREATE SCHEMA IF NOT EXISTS stg;
 
 -- ============================================================================
--- 1. CLEARING TRADES TABLE
+-- 1. CLEARING TRADES TABLE (Bank Side)
 -- ============================================================================
 DROP TABLE IF EXISTS stg.clearing_trades CASCADE;
 CREATE TABLE stg.clearing_trades (
@@ -12,35 +12,47 @@ CREATE TABLE stg.clearing_trades (
     product         TEXT NOT NULL,
     market          TEXT,
     direction       TEXT NOT NULL,
-    quantity        NUMERIC(15,2) NOT NULL,
-    price           NUMERIC(15,2),        -- Nullable for alerting
+    quantity        NUMERIC(15,4) NOT NULL, -- Precision adjusted for commodity decimals
+    price           NUMERIC(15,4),
     counterparty    TEXT,
-    fee             NUMERIC(15,2),
-    trade_date_aest DATE,
-    trade_date_utc  TIMESTAMP NOT NULL,   -- Normalized for joining
+    fee             NUMERIC(15,4),
+    trade_date_aest DATE NOT NULL,          -- Matches DD/MM/YYYY format in CSV
+    trade_date_utc  TIMESTAMP NOT NULL,
     is_complete     BOOLEAN DEFAULT TRUE,
-    total_value     NUMERIC(15,2),
+    total_value     NUMERIC(15,4),
     created_at      TIMESTAMP DEFAULT NOW(),
     updated_at      TIMESTAMP DEFAULT NOW(),
     CONSTRAINT pk_clearing_trades PRIMARY KEY (trade_number, fill_sequence)
 );
 
+-- Index for the Reconciliation View Grouping
+-- Optimized for Index-Only Scans by INCLUDING the sum-targets
+CREATE INDEX idx_clearing_trades_recon_lookup 
+ON stg.clearing_trades (trade_date_aest, product, counterparty, direction)
+INCLUDE (quantity, total_value);
+
 -- ============================================================================
--- 2. TRANSACTIONS TABLE
+-- 2. TRANSACTIONS TABLE (Exchange Side)
 -- ============================================================================
 DROP TABLE IF EXISTS stg.transactions CASCADE;
 CREATE TABLE stg.transactions (
     unique_id       TEXT PRIMARY KEY,
-    product         TEXT,
+    product         TEXT NOT NULL,
     trade_type      TEXT,
-    direction       TEXT,
-    quantity        NUMERIC,
-    trade_price     NUMERIC,
+    direction       TEXT NOT NULL,
+    quantity        NUMERIC(15,4) NOT NULL,
+    trade_price     NUMERIC(15,4) NOT NULL,
     counterparty    TEXT,
-    trade_date_utc  TIMESTAMP,
+    trade_date_utc  TIMESTAMP NOT NULL,
     created_at      TIMESTAMP DEFAULT NOW(),
     updated_at      TIMESTAMP DEFAULT NOW()
 );
+
+-- Functional Index: Matches the 'trade_date_utc::DATE' logic in the view
+-- Essential because the Exchange uses Timestamps while the Bank CSV uses Dates
+CREATE INDEX idx_transactions_recon_lookup 
+ON stg.transactions ((trade_date_utc::DATE), product, counterparty, direction)
+INCLUDE (quantity, trade_price);
 
 -- ============================================================================
 -- 3. INSERT EXCHANGE DATA
@@ -68,11 +80,10 @@ ON CONFLICT (unique_id) DO NOTHING;
 -- ============================================================================
 CREATE OR REPLACE VIEW stg.reconciliation_report AS
 WITH bank_agg AS (
-    -- 1. Aggregate Bank Data by Key Attributes
     SELECT
         product,
         counterparty,
-        trade_date_aest AS trade_date, -- Use the raw Date from CSV (fixes 13th vs 14th issue)
+        trade_date_aest AS trade_date,
         direction,
         SUM(quantity) AS bank_qty,
         SUM(total_value) AS bank_value,
@@ -82,13 +93,12 @@ WITH bank_agg AS (
     GROUP BY 1, 2, 3, 4
 ),
 exch_agg AS (
-    -- 2. Aggregate Exchange Data to handle fill splits
     SELECT
         product,
         counterparty,
-        DATE(trade_date_utc) AS trade_date, -- Extract Business Date from UTC timestamp
+        trade_date_utc::DATE AS trade_date, -- Cast matches the functional index
         direction,
-        SUM(ABS(quantity)) AS exch_qty, -- Normalize quantity to positive for comparison
+        SUM(ABS(quantity)) AS exch_qty,
         SUM(trade_price * ABS(quantity)) AS exch_value,
         COUNT(*) AS exch_record_count,
         STRING_AGG(unique_id, ', ') AS exch_refs
@@ -96,13 +106,11 @@ exch_agg AS (
     GROUP BY 1, 2, 3, 4
 )
 SELECT
-    -- 3. Match Aggregated Datasets
     COALESCE(b.product, e.product) AS product,
     COALESCE(b.counterparty, e.counterparty) AS counterparty,
     COALESCE(b.trade_date, e.trade_date) AS trade_date,
     COALESCE(b.direction, e.direction) AS direction,
     
-    -- Metrics
     COALESCE(b.bank_qty, 0) AS bank_quantity,
     COALESCE(e.exch_qty, 0) AS exchange_quantity,
     (COALESCE(b.bank_qty, 0) - COALESCE(e.exch_qty, 0)) AS quantity_diff,
@@ -111,11 +119,9 @@ SELECT
     COALESCE(e.exch_value, 0) AS exchange_value,
     (COALESCE(b.bank_value, 0) - COALESCE(e.exch_value, 0)) AS value_diff,
     
-    -- Reference IDs (Helpful for drilling down)
     b.bank_refs,
     e.exch_refs,
     
-    -- Status Logic
     CASE
         WHEN b.product IS NULL THEN 'MISSING IN BANK'
         WHEN e.product IS NULL THEN 'MISSING IN EXCHANGE'
@@ -125,7 +131,8 @@ SELECT
     END AS recon_status
 FROM bank_agg b
 FULL OUTER JOIN exch_agg e
-    ON b.product = e.product
-    AND b.counterparty = e.counterparty
-    AND b.trade_date = e.trade_date
-    AND b.direction = e.direction;
+    USING (product, counterparty, trade_date, direction);
+
+-- Update statistics for the planner
+EXPLAIN ANALYZE stg.clearing_trades;
+EXPLAIN ANALYZE stg.transactions;

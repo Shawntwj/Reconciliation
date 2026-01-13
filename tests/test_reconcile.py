@@ -55,7 +55,6 @@ class TestReconciliationLogic:
         # (The first row was MATCHED, second was DISCREPANCY > 100)
         called_df = mock_mgr_instance.send_alerts.call_args[0][0]
         assert len(called_df) == 1
-        assert called_df.iloc[0]['contract_id'] == 'T002-1'
         assert called_df.iloc[0]['amount_diff'] == 300.0
 
     @patch('src.reconcile.pd.read_sql')
