@@ -37,7 +37,7 @@ Trade reconciliation system with email alerting.
 - Runs reconciliation checks
 - Sends email alerts when discrepancies exceed threshold
 
-![Sample Output](sample.png)
+![Sample Output](samplepic.png)
 
 ## Configuration
 
