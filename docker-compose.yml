@@ -29,8 +29,11 @@ services:
       - .env
     volumes:
       - ./src:/app/src
+      - ./tests:/app/tests
+      - ./sql:/app/sql
       - ./trades.csv:/app/trades.csv
+      - ./test_trades.csv:/app/test_trades.csv
     environment:
-      - PYTHONPATH=/app      
+      - PYTHONPATH=/app
     command: >
       sh -c "python src/ingest.py && python src/reconcile.py"
