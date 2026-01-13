@@ -67,22 +67,65 @@ ON CONFLICT (unique_id) DO NOTHING;
 -- 4. RECONCILIATION VIEW
 -- ============================================================================
 CREATE OR REPLACE VIEW stg.reconciliation_report AS
-SELECT 
-    COALESCE(c.trade_number || '-' || c.fill_sequence, t.unique_id) AS record_ref,
-    COALESCE(c.product, t.product) as product,
-    COALESCE(c.counterparty, t.counterparty) as counterparty,
-    c.total_value AS bank_value,
-    (t.trade_price * ABS(t.quantity)) AS exchange_value,
-    (COALESCE(c.total_value, 0) - COALESCE((t.trade_price * ABS(t.quantity)), 0)) AS value_diff,
-    CASE 
-        WHEN c.trade_number IS NULL THEN 'MISSING IN BANK'
-        WHEN t.unique_id IS NULL THEN 'MISSING IN EXCHANGE'
-        WHEN ABS(COALESCE(c.total_value, 0) - COALESCE((t.trade_price * ABS(t.quantity)), 0)) > 0.01 THEN 'DISCREPANCY'
+WITH bank_agg AS (
+    -- 1. Aggregate Bank Data by Key Attributes
+    SELECT
+        product,
+        counterparty,
+        trade_date_aest AS trade_date, -- Use the raw Date from CSV (fixes 13th vs 14th issue)
+        direction,
+        SUM(quantity) AS bank_qty,
+        SUM(total_value) AS bank_value,
+        COUNT(*) AS bank_record_count,
+        STRING_AGG(trade_number || '-' || fill_sequence::text, ', ') AS bank_refs
+    FROM stg.clearing_trades
+    GROUP BY 1, 2, 3, 4
+),
+exch_agg AS (
+    -- 2. Aggregate Exchange Data to handle fill splits
+    SELECT
+        product,
+        counterparty,
+        DATE(trade_date_utc) AS trade_date, -- Extract Business Date from UTC timestamp
+        direction,
+        SUM(ABS(quantity)) AS exch_qty, -- Normalize quantity to positive for comparison
+        SUM(trade_price * ABS(quantity)) AS exch_value,
+        COUNT(*) AS exch_record_count,
+        STRING_AGG(unique_id, ', ') AS exch_refs
+    FROM stg.transactions
+    GROUP BY 1, 2, 3, 4
+)
+SELECT
+    -- 3. Match Aggregated Datasets
+    COALESCE(b.product, e.product) AS product,
+    COALESCE(b.counterparty, e.counterparty) AS counterparty,
+    COALESCE(b.trade_date, e.trade_date) AS trade_date,
+    COALESCE(b.direction, e.direction) AS direction,
+    
+    -- Metrics
+    COALESCE(b.bank_qty, 0) AS bank_quantity,
+    COALESCE(e.exch_qty, 0) AS exchange_quantity,
+    (COALESCE(b.bank_qty, 0) - COALESCE(e.exch_qty, 0)) AS quantity_diff,
+    
+    COALESCE(b.bank_value, 0) AS bank_value,
+    COALESCE(e.exch_value, 0) AS exchange_value,
+    (COALESCE(b.bank_value, 0) - COALESCE(e.exch_value, 0)) AS value_diff,
+    
+    -- Reference IDs (Helpful for drilling down)
+    b.bank_refs,
+    e.exch_refs,
+    
+    -- Status Logic
+    CASE
+        WHEN b.product IS NULL THEN 'MISSING IN BANK'
+        WHEN e.product IS NULL THEN 'MISSING IN EXCHANGE'
+        WHEN ABS(COALESCE(b.bank_qty, 0) - COALESCE(e.exch_qty, 0)) > 0.0001 THEN 'QTY MISMATCH'
+        WHEN ABS(COALESCE(b.bank_value, 0) - COALESCE(e.exch_value, 0)) > 0.01 THEN 'VALUE MISMATCH'
         ELSE 'MATCHED'
     END AS recon_status
-FROM stg.clearing_trades c
-FULL OUTER JOIN stg.transactions t 
-    ON c.product = t.product 
-    AND c.counterparty = t.counterparty 
-    AND DATE(c.trade_date_utc) = DATE(t.trade_date_utc)
-    AND c.direction = t.direction;
+FROM bank_agg b
+FULL OUTER JOIN exch_agg e
+    ON b.product = e.product
+    AND b.counterparty = e.counterparty
+    AND b.trade_date = e.trade_date
+    AND b.direction = e.direction;
